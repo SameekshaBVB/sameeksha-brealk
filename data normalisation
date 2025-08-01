@@ -1,0 +1,324 @@
+import mysql.connector
+from mysql.connector import Error
+import sys
+from datetime import datetime
+
+
+class CompleteCategoryFixMigration:
+    def __init__(self):
+        # Database configuration - UPDATE THESE TO MATCH YOUR SETTINGS
+        self.db_config = {
+            'host': 'localhost',
+            'user': 'root',
+            'password': 'root',
+            'database': 'cultural_fest'
+        }
+
+        # Define the correct category mapping
+        self.category_mapping = {
+            1: [1, 2],  # Category 1: Classes 1, 2
+            2: [3, 4],  # Category 2: Classes 3, 4
+            3: [5, 6, 7],  # Category 3: Classes 5, 6, 7
+            4: [8, 9, 10],  # Category 4: Classes 8, 9, 10
+            5: [11, 12]  # Category 5: Classes 11, 12
+        }
+
+        # Reverse mapping for quick lookup
+        self.class_to_category = {}
+        for category, classes in self.category_mapping.items():
+            for class_num in classes:
+                self.class_to_category[class_num] = category
+
+    def get_db_connection(self):
+        """Get database connection"""
+        try:
+            connection = mysql.connector.connect(**self.db_config)
+            return connection
+        except Error as e:
+            print(f"❌ Error connecting to database: {e}")
+            return None
+
+    def get_current_data_distribution(self):
+        """Get current distribution of classes across categories"""
+        connection = self.get_db_connection()
+        if not connection:
+            return None
+
+        try:
+            cursor = connection.cursor()
+            distribution = {}
+
+            print("📊 Current Data Distribution:")
+            print("=" * 60)
+
+            for category in range(1, 6):
+                distribution[category] = {'individual': {}, 'group': {}}
+
+                # Get individual records
+                cursor.execute(f"SELECT class_num, COUNT(*) FROM cat{category}_individual GROUP BY class_num")
+                ind_results = cursor.fetchall()
+
+                # Get group records
+                cursor.execute(f"SELECT class_num, COUNT(*) FROM cat{category}_group GROUP BY class_num")
+                grp_results = cursor.fetchall()
+
+                # Store results
+                for class_num, count in ind_results:
+                    distribution[category]['individual'][class_num] = count
+
+                for class_num, count in grp_results:
+                    distribution[category]['group'][class_num] = count
+
+                # Display category summary
+                total_records = sum(distribution[category]['individual'].values()) + sum(
+                    distribution[category]['group'].values())
+                if total_records > 0:
+                    print(f"\n   Category {category} (Should have classes {self.category_mapping[category]}):")
+                    for class_num in sorted(set(list(distribution[category]['individual'].keys()) + list(
+                            distribution[category]['group'].keys()))):
+                        ind_count = distribution[category]['individual'].get(class_num, 0)
+                        grp_count = distribution[category]['group'].get(class_num, 0)
+                        correct_category = self.class_to_category.get(class_num, 'Unknown')
+                        status = "✅" if correct_category == category else "❌"
+                        print(f"      Class {class_num}: {ind_count} individual, {grp_count} group {status}")
+
+            cursor.close()
+            connection.close()
+            return distribution
+
+        except Error as e:
+            print(f"❌ Error getting data distribution: {e}")
+            return None
+
+    def identify_misplaced_data(self, distribution):
+        """Identify data that needs to be moved"""
+        misplaced_data = []
+
+        for current_category, data in distribution.items():
+            # Check individual records
+            for class_num, count in data['individual'].items():
+                if count > 0:
+                    correct_category = self.class_to_category.get(class_num)
+                    if correct_category and correct_category != current_category:
+                        misplaced_data.append({
+                            'type': 'individual',
+                            'class_num': class_num,
+                            'count': count,
+                            'from_category': current_category,
+                            'to_category': correct_category
+                        })
+
+            # Check group records
+            for class_num, count in data['group'].items():
+                if count > 0:
+                    correct_category = self.class_to_category.get(class_num)
+                    if correct_category and correct_category != current_category:
+                        misplaced_data.append({
+                            'type': 'group',
+                            'class_num': class_num,
+                            'count': count,
+                            'from_category': current_category,
+                            'to_category': correct_category
+                        })
+
+        return misplaced_data
+
+    def create_backup(self, misplaced_data):
+        """Create backup of all data that will be moved"""
+        connection = self.get_db_connection()
+        if not connection:
+            return False
+
+        try:
+            cursor = connection.cursor()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            print(f"\n📦 Creating backup with timestamp: {timestamp}")
+
+            for item in misplaced_data:
+                table_name = f"cat{item['from_category']}_{item['type']}"
+                backup_table = f"backup_{table_name}_class{item['class_num']}_{timestamp}"
+
+                backup_query = f"""
+                CREATE TABLE IF NOT EXISTS {backup_table} AS 
+                SELECT * FROM {table_name} WHERE class_num = {item['class_num']}
+                """
+
+                cursor.execute(backup_query)
+                print(
+                    f"   ✅ Backed up Class {item['class_num']} {item['type']} data from Category {item['from_category']}")
+
+            connection.commit()
+            cursor.close()
+            connection.close()
+
+            print("✅ All backups created successfully")
+            return True
+
+        except Error as e:
+            print(f"❌ Error creating backup: {e}")
+            return False
+
+    def migrate_data(self, misplaced_data):
+        """Migrate all misplaced data to correct categories"""
+        connection = self.get_db_connection()
+        if not connection:
+            return False
+
+        try:
+            cursor = connection.cursor()
+            total_migrated = 0
+
+            print(f"\n🔄 Starting data migration...")
+
+            for item in misplaced_data:
+                from_table = f"cat{item['from_category']}_{item['type']}"
+                to_table = f"cat{item['to_category']}_{item['type']}"
+
+                print(f"\n   📝 Migrating Class {item['class_num']} {item['type']} records:")
+                print(f"      From: {from_table} → To: {to_table}")
+
+                # Get all records to migrate
+                cursor.execute(f"SELECT * FROM {from_table} WHERE class_num = {item['class_num']}")
+                records = cursor.fetchall()
+
+                if not records:
+                    print(f"      ⚠️  No records found for Class {item['class_num']}")
+                    continue
+
+                # Get column structure (excluding ID column)
+                cursor.execute(f"DESCRIBE {to_table}")
+                columns = cursor.fetchall()
+                column_names = [col[0] for col in columns if col[0] != 'id']  # Exclude auto-increment ID
+
+                # Create insert query
+                placeholders = ', '.join(['%s'] * len(column_names))
+                insert_query = f"INSERT INTO {to_table} ({', '.join(column_names)}) VALUES ({placeholders})"
+
+                # Migrate each record
+                records_migrated = 0
+                for record in records:
+                    # Skip the ID column (first column)
+                    record_data = record[1:]
+                    cursor.execute(insert_query, record_data)
+                    records_migrated += 1
+
+                    # Show record details
+                    if item['type'] == 'individual':
+                        print(f"         ✓ {record[1]} - {record[4]} (Position {record[5]})")
+                    else:  # group
+                        print(f"         ✓ {record[1]} - {record[4]} (Position {record[5]})")
+
+                # Delete original records
+                cursor.execute(f"DELETE FROM {from_table} WHERE class_num = {item['class_num']}")
+                deleted_count = cursor.rowcount
+
+                print(f"      ✅ Migrated {records_migrated} records, deleted {deleted_count} from source")
+                total_migrated += records_migrated
+
+            connection.commit()
+            cursor.close()
+            connection.close()
+
+            print(f"\n✅ Migration completed! Total records migrated: {total_migrated}")
+            return True
+
+        except Error as e:
+            print(f"❌ Error during migration: {e}")
+            connection.rollback()
+            return False
+
+    def verify_migration(self):
+        """Verify that migration was successful"""
+        print(f"\n🔍 Verifying migration...")
+
+        distribution = self.get_current_data_distribution()
+        if not distribution:
+            return False
+
+        misplaced_data = self.identify_misplaced_data(distribution)
+
+        if not misplaced_data:
+            print("\n✅ Verification successful: All classes are in their correct categories!")
+            return True
+        else:
+            print(f"\n⚠️  Warning: Found {len(misplaced_data)} misplaced data items after migration:")
+            for item in misplaced_data:
+                print(
+                    f"   Class {item['class_num']} {item['type']}: {item['count']} records in Category {item['from_category']} (should be in Category {item['to_category']})")
+            return False
+
+    def show_category_rules(self):
+        """Display the category rules"""
+        print("\n📋 Category Rules:")
+        print("=" * 40)
+        for category, classes in self.category_mapping.items():
+            classes_str = ', '.join(map(str, classes))
+            print(f"   Category {category}: Classes {classes_str}")
+
+    def run_migration(self):
+        """Run the complete migration process"""
+        print("🚀 Starting Complete Category Fix Migration")
+        print("=" * 70)
+
+        # Step 1: Show category rules
+        self.show_category_rules()
+
+        # Step 2: Get current distribution
+        distribution = self.get_current_data_distribution()
+        if not distribution:
+            print("❌ Migration aborted due to error getting current data.")
+            return
+
+        # Step 3: Identify misplaced data
+        misplaced_data = self.identify_misplaced_data(distribution)
+
+        if not misplaced_data:
+            print("\n✅ All data is already in the correct categories! No migration needed.")
+            return
+
+        print(f"\n📋 Migration Plan:")
+        print("=" * 50)
+        for item in misplaced_data:
+            print(f"   Class {item['class_num']} {item['type']}: {item['count']} records")
+            print(f"      Move from Category {item['from_category']} → Category {item['to_category']}")
+
+        # Step 4: Ask for confirmation
+        total_records = sum(item['count'] for item in misplaced_data)
+        response = input(f"\n❓ Proceed with migrating {total_records} records? (yes/no): ").lower().strip()
+        if response not in ['yes', 'y']:
+            print("❌ Migration cancelled by user.")
+            return
+
+        # Step 5: Create backup
+        if not self.create_backup(misplaced_data):
+            print("❌ Migration aborted due to backup failure.")
+            return
+
+        # Step 6: Perform migration
+        if not self.migrate_data(misplaced_data):
+            print("❌ Migration failed.")
+            return
+
+        # Step 7: Verify migration
+        if self.verify_migration():
+            print("\n🎉 Migration completed successfully!")
+        else:
+            print("\n⚠️  Migration completed but verification found issues.")
+
+        print("\n💡 Tips:")
+        print("   - Update your application's determine_category function to use the correct mapping")
+        print("   - Backup tables are available if you need to rollback changes")
+        print("   - Run this script again if you add more data and want to verify placement")
+
+
+if __name__ == "__main__":
+    print("Complete Category Fix Migration Tool")
+    print("This script ensures all class data is in the correct category")
+    print("Category 1: Classes 1,2 | Category 2: Classes 3,4 | Category 3: Classes 5,6,7")
+    print("Category 4: Classes 8,9,10 | Category 5: Classes 11,12")
+    print("=" * 80)
+
+    # Create and run migration
+    migrator = CompleteCategoryFixMigration()
+    migrator.run_migration()
