@@ -140,11 +140,11 @@ class FestManagementSystem:
         """Determine category based on class number"""
         if 1 <= class_num <= 2:
             return 1
-        elif 3 <= class_num <= 5:
+        elif 3 <= class_num <= 4:
             return 2
-        elif 6 <= class_num <= 8:
+        elif 5 <= class_num <= 7:
             return 3
-        elif 9 <= class_num <= 10:
+        elif 8 <= class_num <= 10:
             return 4
         elif 11 <= class_num <= 12:
             return 5
